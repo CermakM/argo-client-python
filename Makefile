@@ -40,18 +40,18 @@ endif
 
 CLIENT_VERSION    ?= $(shell b="${GIT_BRANCH}"; v="$${b/release-/}.0"; echo "$${v:0:5}")
 
-ARGO_VERSION      ?= 2.5.0
+KUBERNETES_BRANCH ?= release-1.14
+
+ARGO_VERSION      ?= master
 ARGO_API_GROUP    ?= argoproj.io
 ARGO_API_VERSION  ?= v1alpha1
-ARGO_OPENAPI_SPEC  = openapi/specs/argo-${ARGO_VERSION}.json
 
-KUBERNETES_BRANCH      ?= release-1.14
-KUBERNETES_OPENAPI_SPEC = openapi/specs/kubernetes-${KUBERNETES_BRANCH}.json
+ARGO_OPENAPI_SPEC  = openapi/specs/argo-${ARGO_VERSION}.json
 
 OPENAPI_SPEC   = openapi/swagger.json
 OPENAPI_CONFIG = openapi/custom/config.json
 
-PYPI_REPOSITORY ?= https://upload.pypi.org/legacy/
+PYPI_REPOSITORY   ?= https://upload.pypi.org/legacy/
 
 .PHONY: all
 all: clean validate spec preprocess client
@@ -90,8 +90,6 @@ release: all
 
 	$(MAKE) changelog
 
-	sed -i "s/__version__ = \(.*\)/__version__ = \"${CLIENT_VERSION}\"/g" argo/workflows/client/__about__.py
-
 	python setup.py sdist bdist_wheel
 	twine check dist/* || (echo "Twine check did not pass. Aborting."; exit 1)
 
@@ -110,50 +108,36 @@ validate:
 
 spec:
 	# Make sure the folders exist
-	mkdir -p openapi/specs/
+	mkdir -p openapi/specs/ openapi/prep/
 
 	@echo "Collecting API spec for Argo ${ARGO_VERSION}"
-	curl -sSL https://raw.githubusercontent.com/kubernetes/kubernetes/${KUBERNETES_BRANCH}/api/openapi-spec/swagger.json \
-		-o ${KUBERNETES_OPENAPI_SPEC}
-
-	@echo "Collecting API spec for Kubernetes ${KUBERNETES_BRANCH}"
-	curl -sSL https://raw.githubusercontent.com/argoproj/argo/v${ARGO_VERSION}/api/openapi-spec/swagger.json \
+	curl -sSL https://raw.githubusercontent.com/argoproj/argo/${ARGO_VERSION}/api/openapi-spec/swagger.json \
 		-o ${ARGO_OPENAPI_SPEC}
-
-	@echo "Extracting definitions"
-	jq -r '{ definitions: .definitions }' ${ARGO_OPENAPI_SPEC} \
-		> openapi/definitions/argo.json
-
-	@echo "Merging API definitions"
-	jq -sS '.[0] * .[1]' \
-		openapi/definitions/argo.json \
-		openapi/definitions/V1Time.json \
-		> openapi/definitions.json
 
 	@echo "Creating OpenAPI info"
 	echo '{"info": {"title": "Argo", "description": "${PACKAGE_DESCRIPTION}", "version": "${ARGO_VERSION}"}}' | jq -r '.' \
-		> openapi/info.json
+		> openapi/prep/info.json
 
-	@echo "Process OpenAPI paths"
-	jinja2 openapi/custom/paths.json --format=json --strict \
+	@echo "Prepare Kubernetes OpenAPI paths"
+	jinja2 openapi/paths/kubernetes.json --format=json --strict \
 		-Dargo_api_group=${ARGO_API_GROUP} \
 		-Dargo_api_version=${ARGO_API_VERSION} \
-		> openapi/paths.json
+		> openapi/prep/paths.json
 
 	@echo "Creating OpenAPI spec"
-	jq -s '.[0] + .[1] + .[2] + .[3] + .[4]' \
-		openapi/custom/version.json \
-		openapi/info.json \
-		openapi/custom/security.json \
-		openapi/paths.json \
-		openapi/definitions.json \
+	jq -s '.[0] * .[1] * .[2]' \
+		${ARGO_OPENAPI_SPEC}    \
+		openapi/prep/info.json  \
+		openapi/prep/paths.json \
 		> ${OPENAPI_SPEC}
 
 
 preprocess:
 	@echo "Preprocessing API specs"
 	python scripts/preprocess.py -i ${OPENAPI_SPEC} \
+		-d 'cronio.argoproj.workflow' \
 		-d 'io.argoproj.workflow' \
+		-d 'io.k8s.api.core' \
 		-o ${OPENAPI_SPEC} >/dev/null
 
 	# Replace empty references
@@ -172,6 +156,8 @@ client:
 	KUBERNETES_BRANCH=${KUBERNETES_BRANCH} \
 	PACKAGE_NAME=${PACKAGE_NAME} \
 		./scripts/generate_client.sh ${OUTPUT_DIR} ${OPENAPI_SPEC} ${OPENAPI_CONFIG}
+
+	sed -i "s/__version__ = \(.*\)/__version__ = \"${CLIENT_VERSION}\"/g" argo/workflows/client/__about__.py
 
 changelog:
 	RELEASE_VERSION=${CLIENT_VERSION} ./scripts/generate_changelog.sh
